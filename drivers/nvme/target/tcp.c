@@ -24,6 +24,7 @@
 #include "nvmet.h"
 
 #define NVMET_TCP_DEF_INLINE_DATA_SIZE	(4 * PAGE_SIZE)
+#define NVMET_TCP_BACKLOG		128
 
 static int param_store_val(const char *str, int *val, int min, int max)
 {
@@ -2053,7 +2054,7 @@ static int nvmet_tcp_add_port(struct nvmet_port *nport)
 		goto err_sock;
 	}
 
-	ret = kernel_listen(port->sock, 128);
+	ret = kernel_listen(port->sock, NVMET_TCP_BACKLOG);
 	if (ret) {
 		pr_err("failed to listen %d on port sock\n", ret);
 		goto err_sock;
@@ -2119,8 +2120,19 @@ static u16 nvmet_tcp_install_queue(struct nvmet_sq *sq)
 		container_of(sq, struct nvmet_tcp_queue, nvme_sq);
 
 	if (sq->qid == 0) {
-		/* Let inflight controller teardown complete */
-		flush_workqueue(nvmet_wq);
+		struct nvmet_tcp_queue *q;
+		int pending = 0;
+
+		mutex_lock(&nvmet_tcp_queue_mutex);
+		list_for_each_entry(q, &nvmet_tcp_queue_list, queue_list) {
+			if (q->nvme_sq.ctrl == sq->ctrl &&
+			    q->state == NVMET_TCP_Q_DISCONNECTING)
+				pending++;
+		}
+		mutex_unlock(&nvmet_tcp_queue_mutex);
+		/* Retry for pending controller teardown */
+		if (pending > NVMET_TCP_BACKLOG)
+			return NVME_SC_CONNECT_CTRL_BUSY;
 	}
 
 	queue->nr_cmds = sq->size * 2;
